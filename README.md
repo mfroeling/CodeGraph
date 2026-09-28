@@ -19,11 +19,27 @@ depend on each other (a dependency cycle), and the orange box is a second, small
 
 Nothing else is needed. No server and no MCP: agents only run `wolframscript` and read the text files it writes.
 
+## Installation
+
+Install the latest release from GitHub:
+
+```wl
+ResourceFunction["GitHubInstall"]["mfroeling", "CodeGraph"]
+```
+
+Or install a specific version from the [releases](https://github.com/mfroeling/CodeGraph/releases) page:
+
+```wl
+PacletInstall["https://github.com/mfroeling/CodeGraph/releases/download/0.1.0/CodeGraph-0.1.0.paclet"]
+```
+
+For the command line, clone the repository and use `CodeGraph/Scripts/codegraph.wls`. It loads the paclet from the
+clone, so nothing has to be installed.
+
 ## Use in a notebook
 
 ```wl
-PacletDirectoryLoad["<path>/CodeGraph/CodeGraph"];  (* or PacletInstall once released *)
-Needs["CodeGraph`"]
+Needs["CodeGraph`"]  (* or PacletDirectoryLoad["<clone>/CodeGraph"] first when working from a clone *)
 
 cg = BuildCodeGraph["<paclet>/Kernel"];
 CodeGraphSummary[cg]                        (* counts, cyclic package groups, private symbols without callers *)
