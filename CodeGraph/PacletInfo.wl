@@ -1,0 +1,13 @@
+(* ::Package:: *)
+
+Paclet[
+    Name -> "CodeGraph",
+    Version -> "0.1.0",
+    WolframVersion -> "13.0+",
+    Description -> "Static call graph of Wolfram Language paclets: definitions, callers and package dependencies, with interactive views",
+    Creator -> "Martijn Froeling <m.froeling@gmail.com>",
+    Extensions ->
+        {
+            {"Kernel", Root -> "Kernel", Context -> "CodeGraph`"}
+        }
+]
