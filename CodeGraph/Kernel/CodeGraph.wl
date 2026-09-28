@@ -360,10 +360,11 @@ SymbolGraph[cg_Association, sym_String, n_Integer: 1, dir_String: "Both"] := Blo
 	edges = Select[EdgeList[Subgraph[g, Keys[cols]]], cols[#[[2]]] == cols[#[[1]]] + 1 &];
 
 	col = colors[Union[Keys[cols][[All, 2]]]];
-	box[v_] := Button[Tooltip[
+	(*Button holds its action, so the file is inserted now, the Block variables are gone at click time*)
+	box[v_] := With[{file = Lookup[defs, Key[v], {"", ""}][[2]]}, Button[Tooltip[
 		Framed[Style[v[[1]], 11, Black, If[v[[1]] === sym, Bold, Plain]], Background -> col[v[[2]]], FrameStyle -> If[v[[1]] === sym, Directive[Black, Thick], None],
 			RoundingRadius -> 3, FrameMargins -> {{4, 4}, {1, 1}}],
-		v[[2]] <> "  " <> location[defs, v]], SystemOpen[Lookup[defs, Key[v], {"", ""}][[2]]], Appearance -> None];
+		v[[2]] <> "  " <> location[defs, v]], SystemOpen[file], Appearance -> None]];
 
 	Legended[Graph[Keys[pos], edges,
 		VertexCoordinates -> Normal[pos],
