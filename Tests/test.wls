@@ -20,8 +20,12 @@ checks = {
 	"public" -> defs[{"fa", "Multi`A`"}] && !defs[{"helper", "Multi`A`"}],
 	(*new-style Package and PackageExport*)
 	"package export" -> defs[{"na", "New"}] && !defs[{"nb", "New"}] && MemberQ[edges, {"na", "New", "nb", "New"}],
-	(*code outside any package is its own public package named after the file*)
-	"script" -> defs[{"s1", "script"}] && MemberQ[edges, {"oa", "Other`A`", "s1", "script"}],
+	(*files without any context are grouped per folder, private when the source has packages*)
+	"headless folder" -> KeyExistsQ[defs, {"s1", "parts"}] && !defs[{"s1", "parts"}] && MemberQ[edges, {"oa", "Other`A`", "s1", "parts"}],
+	(*unless declared elsewhere, here as a qualified string in the PacletInfo Symbols list*)
+	"declared in PacletInfo" -> defs[{"s2", "parts"}],
+	(*code before BeginPackage belongs to the context of its own file*)
+	"loader code" -> KeyExistsQ[defs, {"$otherLoaded", "Other`A`"}],
 	(*Block local shadowing a function is not a call*)
 	"locals" -> !MemberQ[edges, {"fb", "B", "fa", _}] && MemberQ[edges, {"fb2", "B", "fa", "Multi`A`"}],
 	(*two steps up from helper: sb calls it directly, sa via sb*)

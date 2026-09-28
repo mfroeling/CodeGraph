@@ -30,7 +30,7 @@ ResourceFunction["GitHubInstall"]["mfroeling", "CodeGraph"]
 Or install a specific version from the [releases](https://github.com/mfroeling/CodeGraph/releases) page:
 
 ```wl
-PacletInstall["https://github.com/mfroeling/CodeGraph/releases/download/0.1.0/CodeGraph-0.1.0.paclet"]
+PacletInstall["https://github.com/mfroeling/CodeGraph/releases/download/0.1.1/CodeGraph-0.1.1.paclet"]
 ```
 
 For the command line, clone the repository and use `CodeGraph/Scripts/codegraph.wls`. It loads the paclet from the
@@ -138,6 +138,9 @@ size, so rebuild at milestones, not after every edit.
 - A call to a symbol with a full context (`` Pkg`Private`f ``) goes to that package. Otherwise it goes to the caller's own
   package first, then to the package that exports the symbol.
 - Pattern names, `Block`/`Module`/`With` variables and iterators are not counted as calls.
+- Files without a context of their own, which a loader usually pulls in with `Get`, are grouped per folder. Their
+  definitions are public when a public section or `PacletInfo` declares them, for example as ``"Pkg`f"``.
+- A "call" is any use of a defined symbol inside a definition, so a data head used in patterns counts as well.
 
 ## Limits
 

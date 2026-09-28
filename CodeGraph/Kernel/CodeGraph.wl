@@ -81,17 +81,20 @@ local[node_] := Flatten[{
 }];
 
 (*context stack: first element is the package, deeper means private*)
-push[c_String] := AppendTo[stack, If[StringStartsQ[c, "`"], If[stack === {}, "Global`", Last[stack]] <> StringDrop[c, 1], c]];
+push[c_String] := (AppendTo[stack, If[StringStartsQ[c, "`"], If[stack === {}, "Global`", Last[stack]] <> StringDrop[c, 1], c]]; If[first === None, first = First[stack]]);
 pop[] := If[stack =!= {}, stack = Most[stack]];
 
-mention[st_] := If[Length[stack] == 1, mentions = Join[mentions, {First[stack], short[#]} & /@ Cases[st, LeafNode[Symbol, n_, _] :> n, {0, Infinity}]]];
+(*names in a public section or a PacletInfo file, as symbols or as context qualified strings like "Pkg`f"*)
+mention[st_] := If[Length[stack] == 1 || FileBaseName[file] === "PacletInfo", mentions = Join[mentions, {First[stack, None], short[#]} & /@ Join[
+	Cases[st, LeafNode[Symbol, n_, _] :> n, {0, Infinity}],
+	Cases[st, LeafNode[String, s_ /; StringMatchQ[s, "\"" ~~ (WordCharacter | "$" | "`") .. ~~ "`" ~~ (WordCharacter | "$") .. ~~ "\""], _] :> StringTake[s, {2, -2}], {0, Infinity}]]]];
 
 walk[l_List] := Scan[walk, l];
 walk[CallNode[LeafNode[Symbol, "CompoundExpression", _], args_, _]] := walk[args];
 walk[(PackageNode | ContextNode)[{c_, ___}, body_, _]] := (push[str[c]]; walk[body]; pop[]);
 walk[CallNode[LeafNode[Symbol, "BeginPackage" | "Begin", _], {c_, ___}, _]] := push[str[c]];
 walk[CallNode[LeafNode[Symbol, "EndPackage" | "End", _], {}, _]] := pop[];
-walk[CallNode[LeafNode[Symbol, "Package", _], {c_}, _]] := (stack = {str[c], str[c] <> "PackageScope`"});
+walk[CallNode[LeafNode[Symbol, "Package", _], {c_}, _]] := (stack = {str[c], str[c] <> "PackageScope`"}; If[first === None, first = str[c]]);
 walk[CallNode[LeafNode[Symbol, "PackageExport", _], {c_}, _]] := AppendTo[mentions, {First[stack, None], str[c]}];
 walk[st : CallNode[LeafNode[Symbol, "Set" | "SetDelayed", _], {lhs_, _}, data_]] := With[{h = lhsHead[lhs]},
 	mention[st];
@@ -101,9 +104,10 @@ walk[st : CallNode[LeafNode[Symbol, "Set" | "SetDelayed", _], {lhs_, _}, data_]]
 ];
 walk[st_] := mention[st];
 
-parseFile[f_] := Block[{file = f, stack = {}, defs = {}, mentions = {}},
+(*code outside any package belongs to the first context of its file, if the file has one*)
+parseFile[f_] := Block[{file = f, stack = {}, first = None, defs = {}, mentions = {}},
 	walk[CodeParse[File[file]][[2]]];
-	{defs, mentions}
+	{If[#context === None && StringQ[first], Append[#, "context" -> first], #] & /@ defs, mentions}
 ];
 
 
@@ -113,19 +117,24 @@ parseFile[f_] := Block[{file = f, stack = {}, defs = {}, mentions = {}},
 
 SyntaxInformation[BuildCodeGraph] = {"ArgumentsPattern" -> {_}};
 
-BuildCodeGraph[dir_String] := Block[{files, parsed, defs, mentions, key, label, pack, names, packsOf, publicPack, ctxPack, resolve, edges},
+BuildCodeGraph[dir_String] := Block[{files, parsed, defs, mentions, declared, anyContext, folder, key, label, pack, names, packsOf, publicPack, ctxPack, resolve, edges},
 	files = FileNames[{"*.wl", "*.m"}, dir, Infinity];
 	parsed = parseFile /@ files;
 	defs = Flatten[parsed[[All, 1]]];
 	mentions = Union @@ parsed[[All, 2]];
+	anyContext = AnyTrue[defs, StringQ[#context] &];
 
-	(*package key is the context, or the file for code outside any package; label is the last context part unless ambiguous*)
-	key[d_] := Replace[d["context"], None -> FileBaseName[d["file"]]];
+	(*package key is the context; files without any context are grouped per folder, as loaders usually Get whole folders*)
+	folder[f_] := With[{rel = StringTrim[StringReplace[StringDrop[DirectoryName[f], StringLength[dir]], "\\" -> "/"], "/"]},
+		If[rel === "", FileNameTake[dir], rel]];
+	key[d_] := Replace[d["context"], None -> folder[d["file"]]];
 	label = Association[Flatten[KeyValueMap[If[Length[#2] == 1, First[#2] -> #1, Thread[#2 -> #2]] &,
 		GroupBy[Select[Union[key /@ defs], StringEndsQ["`"]], short]]]];
 	label = Join[AssociationMap[Identity, Complement[Union[key /@ defs], Keys[label]]], label];
 	pack[d_] := label[key[d]];
-	defs = Append[#, <|"pack" -> pack[#], "public" -> (!#private || MemberQ[mentions, {#context, #name}])|>] & /@ defs;
+	(*code without context is only public when the source has no packages at all, otherwise it is loaded into one*)
+	declared = Union[mentions[[All, 2]]];
+	defs = Append[#, <|"pack" -> pack[#], "public" -> If[#context === None, !anyContext || MemberQ[declared, #name], !#private || MemberQ[mentions, {#context, #name}]]|>] & /@ defs;
 
 	names = Union[defs[[All, "name"]]];
 	packsOf = GroupBy[defs, #name &, Union[#[[All, "pack"]]] &];
@@ -309,6 +318,9 @@ CodeGraphQuery[cg_Association, type : "callers" | "callees", sym_String, n_Integ
 (*light colors spread evenly over the packages in the view*)
 colors[packs_] := AssociationThread[packs, Hue[#, 0.35, 1] & /@ (Range[0, Length[packs] - 1]/Length[packs])];
 
+(*image width grows with the number of packages, so small paclets are not stretched*)
+size[n_] := Clip[Round[220 Sqrt[n]], {350, 1100}];
+
 SyntaxInformation[PackageGraph] = {"ArgumentsPattern" -> {_, _.}};
 
 PackageGraph[cg_Association, type_String: "Layered"] := Block[{ed, w, g, groups, col, of, cond},
@@ -323,7 +335,7 @@ PackageGraph[cg_Association, type_String: "Layered"] := Block[{ed, w, g, groups,
 		{of, cond} = condense[g];
 		cond = TransitiveReductionGraph[cond];
 		Graph[cond,
-			VertexShape -> None, VertexSize -> 0, ImageSize -> 1100,
+			VertexShape -> None, VertexSize -> 0, ImageSize -> size[VertexCount[cond]],
 			VertexLabels -> (# -> Placed[Framed[#, Background -> Lookup[Association[MapIndexed[of[First[#1]] -> Lighter[col[First[#2]], 0.6] &, groups]], #, LightGray],
 				RoundingRadius -> 4, FrameStyle -> None, BaseStyle -> Black], Center] & /@ VertexList[cond]),
 			EdgeStyle -> Directive[GrayLevel[0.5], Arrowheads[0.012]],
@@ -331,7 +343,7 @@ PackageGraph[cg_Association, type_String: "Layered"] := Block[{ed, w, g, groups,
 		],
 
 		Graph[g,
-			VertexLabels -> "Name", VertexSize -> 0.4, ImageSize -> 1100,
+			VertexLabels -> "Name", VertexSize -> 0.4, ImageSize -> size[VertexCount[g]],
 			VertexStyle -> Join[Thread[VertexList[g] -> LightGray], Flatten[MapIndexed[Thread[#1 -> col[First[#2]]] &, groups]]],
 			EdgeStyle -> KeyValueMap[#1 -> Directive[GrayLevel[0.5, 0.6], Arrowheads[0.015], AbsoluteThickness[0.5 + 4 #2/w]] &, ed],
 			EdgeLabels -> KeyValueMap[#1 -> Placed[ToString[#2] <> " calls", Tooltip] &, ed],

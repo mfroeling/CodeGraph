@@ -1,6 +1,5 @@
-(* no package, and a second context ending in A` *)
-s1[] := s2[];
-s2[] := 1;
+(* a second context ending in A`, with loader code before it *)
+$otherLoaded = True;
 
 BeginPackage["Other`A`"];
 oa::usage = "oa[]";
