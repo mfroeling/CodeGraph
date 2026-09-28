@@ -28,6 +28,15 @@ ImportCodeGraph::usage =
 CodeGraphSummary::usage =
 "CodeGraphSummary[cg] gives the counts, the cyclic package groups and the private symbols without callers of the call graph cg.";
 
+CodeGraphOverview::usage =
+"CodeGraphOverview[cg] gives a markdown overview of the call graph cg: package layers, cycles, the 20 most used functions and private functions without callers.
+CodeGraphOverview[cg, n] lists the n most used functions. ExportCodeGraph writes it as overview.md.";
+
+CodeGraphQuery::usage =
+"CodeGraphQuery[cg, \"callers\", sym] gives the functions that call sym as tab separated text with package and definition location.
+CodeGraphQuery[cg, \"callees\", sym] gives the functions sym calls.
+CodeGraphQuery[cg, type, sym, n] follows n steps.";
+
 PackageGraph::usage =
 "PackageGraph[cg] shows the package dependencies layered from callers (top) to foundation (bottom), cyclic groups in color.
 PackageGraph[cg, \"Condensed\"] collapses each cycle into one box and only keeps edges not implied by a longer path.
@@ -155,6 +164,7 @@ ExportCodeGraph[dir_String, cg_Association] := (
 	Quiet[CreateDirectory[dir]];
 	Export[FileNameJoin[{dir, "defs.tsv"}], Prepend[cg["Definitions"], $defHeader], "TSV"];
 	Export[FileNameJoin[{dir, "edges.tsv"}], Prepend[cg["Edges"], $edgeHeader], "TSV"];
+	Export[FileNameJoin[{dir, "overview.md"}], CodeGraphOverview[cg], "Text"];
 	dir
 );
 
@@ -187,6 +197,112 @@ CodeGraphSummary[cg_Association] := Block[{packEdges, public},
 
 
 (* ::Subsection:: *)
+(*Shared graph helpers*)
+
+
+(*package dependency graph, all packages as vertices*)
+packageGraph[cg_] := Graph[Union[cg["Definitions"][[All, 2]]], Union[Cases[cg["Edges"], {_, a_, _, _, b_} /; a =!= b :> DirectedEdge[a, b]]]];
+
+(*each cycle as one vertex named by its sorted members, gives the member map and the acyclic graph*)
+condense[g_] := Block[{name, of},
+	name[c_] := If[Length[c] == 1, First[c], StringRiffle[Sort[c], "\n"]];
+	of = Association[Flatten[Thread[# -> name[#]] & /@ ConnectedComponents[g]]];
+	{of, Graph[Union[Values[of]], Union[Cases[EdgeList[g], DirectedEdge[a_, b_] /; of[a] =!= of[b] :> DirectedEdge[of[a], of[b]]]]]}
+];
+
+(*symbol graph with {name, package} vertices, and the first definition {line, file} per vertex*)
+symbolGraph[cg_] := Block[{ed, defs},
+	ed = Union[Cases[cg["Edges"], {c_, cp_, _, d_, dp_} /; c =!= d :> DirectedEdge[{c, cp}, {d, dp}]]];
+	defs = GroupBy[cg["Definitions"], {#[[1]], #[[2]]} &, #[[1, {3, 5}]] &];
+	{Graph[Union[Keys[defs], Flatten[List @@@ ed, 1]], ed], defs}
+];
+
+(*steps from the focus vertices, callers negative, callees positive, nearest side wins*)
+steps[g_, focus_, n_, dir_] := Block[{in, out},
+	in = If[dir === "Out", <||>, Association[Function[v, v -> -Min[GraphDistance[g, v, #] & /@ focus]] /@ Complement[VertexInComponent[g, focus, n], focus]]];
+	out = If[dir === "In", <||>, Association[Function[v, v -> Min[GraphDistance[g, #, v] & /@ focus]] /@ Complement[VertexOutComponent[g, focus, n], focus]]];
+	Join[Merge[{in, out}, First[SortBy[#, {Abs, Minus}]] &], AssociationThread[focus, 0]]
+];
+
+location[defs_, v_] := With[{d = Lookup[defs, Key[v], {"?", ""}]}, FileNameTake[d[[2]]] <> ":" <> ToString[d[[1]]]];
+
+(*distinct callers and caller packages per function, most used first*)
+usage[cg_] := ReverseSortBy[KeyValueMap[Join[#1, {Length[Union[#2[[All, {1, 2}]]]], Length[Union[#2[[All, 2]]]]}] &,
+	GroupBy[cg["Edges"], #[[{4, 5}]] &]], #[[3 ;;]] &];
+
+
+(* ::Subsection:: *)
+(*CodeGraphOverview*)
+
+
+SyntaxInformation[CodeGraphOverview] = {"ArgumentsPattern" -> {_, _.}};
+
+CodeGraphOverview[cg_Association, top_Integer: 20] := Block[{sum, of, dag, h, layers},
+	sum = CodeGraphSummary[cg];
+	{of, dag} = condense[packageGraph[cg]];
+
+	(*layer = longest path down to a package that depends on nothing*)
+	h = <||>;
+	Scan[(h[#] = Max[0, 1 + Lookup[h, VertexOutComponent[dag, #, {1}], -1]]) &, Reverse[TopologicalSort[dag]]];
+	layers = KeySortBy[GroupBy[Keys[h], h], Minus];
+
+	StringRiffle[Flatten[{
+		"# Code graph overview",
+		"",
+		"Source: `" <> cg["Source"] <> "`, built " <> DateString["ISODate"] <> ". " <> ToString[sum["Files"]] <> " files, " <>
+			ToString[sum["Definitions"]] <> " definitions, " <> ToString[sum["Edges"]] <> " call edges.",
+		"Static analysis: runtime-built calls and callers outside the source are not seen. Rebuild after adding, removing or moving definitions.",
+		"Query with `codegraph.wls <graphDir> callers|callees <symbol> [depth]`, or grep edges.tsv (caller, callerPackage, line, callee, calleePackage).",
+		"",
+		"## Package layers",
+		"",
+		"Packages only call packages in lower layers or in their own cycle (in brackets). Layer 0 depends on nothing.",
+		"",
+		KeyValueMap["- " <> ToString[#1] <> ": " <> StringRiffle[Sort[If[StringContainsQ[#, "\n"], "[" <> StringReplace[#, "\n" -> ", "] <> "]", #] & /@ #2], ", "] &, layers],
+		"",
+		"## Dependency cycles",
+		"",
+		If[sum["CyclicGroups"] === {}, "None.", "- " <> StringRiffle[Sort[#], ", "] & /@ sum["CyclicGroups"]],
+		"",
+		"## Most used functions",
+		"",
+		"| Function | Package | Callers | From packages |",
+		"| --- | --- | --- | --- |",
+		"| " <> StringRiffle[ToString /@ #, " | "] <> " |" & /@ Take[usage[cg], UpTo[top]],
+		"",
+		"## Private functions without callers in this source",
+		"",
+		If[sum["Uncalled"] === {}, "None.", StringRiffle[sum["Uncalled"], ", "]]
+	}], "\n"]
+];
+
+
+(* ::Subsection:: *)
+(*CodeGraphQuery*)
+
+
+SyntaxInformation[CodeGraphQuery] = {"ArgumentsPattern" -> {_, _, _, _.}};
+
+CodeGraphQuery[cg_Association, type : "callers" | "callees", sym_String, n_Integer: 1] := Block[{g, defs, focus, cols, sign, at, link},
+	{g, defs} = symbolGraph[cg];
+	focus = Select[VertexList[g], #[[1]] === sym &];
+	If[focus === {}, Return["unknown symbol " <> sym]];
+
+	sign = If[type === "callers", -1, 1];
+	cols = steps[g, focus, n, If[sign < 0, "In", "Out"]];
+	at[k_] := SortBy[Select[Keys[cols], cols[#] == sign k &], Reverse];
+	(*for each function the ones in the previous step it calls or is called by*)
+	link[v_, k_] := StringRiffle[Select[at[k - 1], EdgeQ[g, If[sign < 0, DirectedEdge[v, #], DirectedEdge[#, v]]] &][[All, 1]], ", "];
+
+	StringRiffle[Flatten[{
+		type <> " of " <> sym <> " (" <> StringRiffle[focus[[All, 2]], ", "] <> "), " <> ToString[n] <> " step(s), " <> ToString[Length[cols] - Length[focus]] <> " functions",
+		"step\tfunction\tpackage\tdefined\t" <> If[sign < 0, "calls", "called by"],
+		Table[StringRiffle[{k, #[[1]], #[[2]], location[defs, #], link[#, k]}, "\t"] & /@ at[k], {k, n}]
+	}], "\n"]
+];
+
+
+(* ::Subsection:: *)
 (*PackageGraph*)
 
 
@@ -195,22 +311,20 @@ colors[packs_] := AssociationThread[packs, Hue[#, 0.35, 1] & /@ (Range[0, Length
 
 SyntaxInformation[PackageGraph] = {"ArgumentsPattern" -> {_, _.}};
 
-PackageGraph[cg_Association, type_String: "Layered"] := Block[{ed, w, g, groups, col, of, cond, name},
+PackageGraph[cg_Association, type_String: "Layered"] := Block[{ed, w, g, groups, col, of, cond},
 	ed = Counts[Cases[cg["Edges"], {_, a_, _, _, b_} /; a =!= b :> DirectedEdge[a, b]]];
-	g = Graph[Union[cg["Definitions"][[All, 2]]], Keys[ed]];
+	g = packageGraph[cg];
 	w = Max[ed, 1];
 	groups = Select[ConnectedComponents[g], Length[#] > 1 &];
 	col = AssociationThread[Range[Length[groups]], PadRight[{Red, Orange, Purple, Darker[Green]}, Length[groups], Brown]];
 
 	If[type === "Condensed",
 		(*each cycle becomes one box, then only edges not implied by a longer path*)
-		name[c_] := If[Length[c] == 1, First[c], StringRiffle[Sort[c], "\n"]];
-		of = Association[Flatten[Thread[# -> name[#]] & /@ ConnectedComponents[g]]];
-		cond = TransitiveReductionGraph[Graph[Union[Values[of]],
-			Union[Cases[EdgeList[g], DirectedEdge[a_, b_] /; of[a] =!= of[b] :> DirectedEdge[of[a], of[b]]]]]];
+		{of, cond} = condense[g];
+		cond = TransitiveReductionGraph[cond];
 		Graph[cond,
 			VertexShape -> None, VertexSize -> 0, ImageSize -> 1100,
-			VertexLabels -> (# -> Placed[Framed[#, Background -> Lookup[Association[MapIndexed[name[#1] -> Lighter[col[First[#2]], 0.6] &, groups]], #, LightGray],
+			VertexLabels -> (# -> Placed[Framed[#, Background -> Lookup[Association[MapIndexed[of[First[#1]] -> Lighter[col[First[#2]], 0.6] &, groups]], #, LightGray],
 				RoundingRadius -> 4, FrameStyle -> None, BaseStyle -> Black], Center] & /@ VertexList[cond]),
 			EdgeStyle -> Directive[GrayLevel[0.5], Arrowheads[0.012]],
 			GraphLayout -> {"LayeredDigraphEmbedding", "Orientation" -> Top}
@@ -234,29 +348,22 @@ PackageGraph[cg_Association, type_String: "Layered"] := Block[{ed, w, g, groups,
 SyntaxInformation[SymbolGraph] = {"ArgumentsPattern" -> {_, _, _., _.}};
 
 SymbolGraph[cg_Association, sym_String, n_Integer: 1, dir_String: "Both"] := Block[{
-		ed, defs, g, focus, in, out, cols, pos, edges, col, def, box, dy = 24/260.
+		defs, g, focus, cols, pos, edges, col, box, dy = 24/260.
 	},
-	ed = Union[Cases[cg["Edges"], {c_, cp_, _, d_, dp_} /; c =!= d :> DirectedEdge[{c, cp}, {d, dp}]]];
-	defs = GroupBy[cg["Definitions"], {#[[1]], #[[2]]} &, #[[1, {3, 5}]] &];
-	g = Graph[Union[Keys[defs], Flatten[List @@@ ed, 1]], ed];
+	{g, defs} = symbolGraph[cg];
 	focus = Select[VertexList[g], #[[1]] === sym &];
 	If[focus === {}, Return[Missing["UnknownSymbol", sym]]];
-
-	(*column = steps from the symbol, callers negative, callees positive, nearest side wins*)
-	in = If[dir === "Out", <||>, Association[Function[v, v -> -Min[GraphDistance[g, v, #] & /@ focus]] /@ Complement[VertexInComponent[g, focus, n], focus]]];
-	out = If[dir === "In", <||>, Association[Function[v, v -> Min[GraphDistance[g, #, v] & /@ focus]] /@ Complement[VertexOutComponent[g, focus, n], focus]]];
-	cols = Join[Merge[{in, out}, First[SortBy[#, {Abs, Minus}]] &], AssociationThread[focus, 0]];
+	cols = steps[g, focus, n, dir];
 
 	(*each column a vertical list sorted by package, only edges between neighboring columns*)
 	pos = Association[KeyValueMap[Function[{c, vs}, MapIndexed[#1 -> {c, -dy (First[#2] - (Length[vs] + 1)/2)} &, SortBy[vs, Reverse]]], GroupBy[Keys[cols], cols]]];
 	edges = Select[EdgeList[Subgraph[g, Keys[cols]]], cols[#[[2]]] == cols[#[[1]]] + 1 &];
 
 	col = colors[Union[Keys[cols][[All, 2]]]];
-	def[v_] := Lookup[defs, Key[v], {"?", ""}];
 	box[v_] := Button[Tooltip[
 		Framed[Style[v[[1]], 11, Black, If[v[[1]] === sym, Bold, Plain]], Background -> col[v[[2]]], FrameStyle -> If[v[[1]] === sym, Directive[Black, Thick], None],
 			RoundingRadius -> 3, FrameMargins -> {{4, 4}, {1, 1}}],
-		v[[2]] <> "  " <> FileNameTake[def[v][[2]]] <> ":" <> ToString[def[v][[1]]]], SystemOpen[def[v][[2]]], Appearance -> None];
+		v[[2]] <> "  " <> location[defs, v]], SystemOpen[Lookup[defs, Key[v], {"", ""}][[2]]], Appearance -> None];
 
 	Legended[Graph[Keys[pos], edges,
 		VertexCoordinates -> Normal[pos],
