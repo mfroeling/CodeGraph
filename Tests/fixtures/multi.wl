@@ -13,5 +13,7 @@ Begin["`Private`"];
 fb[x_] := Block[{fa = 1}, fa + helperB[x]];
 fb2[x_] := fa[x];
 helperB[x_] := x;
+defaultB = {1, 2};
+Options[fb2] = {"Mode" -> defaultB};
 End[];
 EndPackage[];

@@ -8,8 +8,9 @@ cycles are.
 ![Condensed package graph of QMRITools](images/package-condensed.png)
 
 *The packages of [QMRITools](https://github.com/mfroeling/QMRITools), a paclet of about 30 packages, from
-`PackageGraph[cg, "Condensed"]`. Packages at the top call the ones below. The red box is a group of 10 packages that all
-depend on each other (a dependency cycle), and the orange box is a second, smaller cycle.*
+`PackageGraph[cg, "Condensed"]` with its legacy code excluded. Packages at the top call the ones below. Colored boxes
+are dependency cycles: the orange box is a group of 10 packages that all depend on each other, the purple and red boxes
+are smaller cycles.*
 
 ## Requirements
 
@@ -30,7 +31,7 @@ ResourceFunction["GitHubInstall"]["mfroeling", "CodeGraph"]
 Or install a specific version from the [releases](https://github.com/mfroeling/CodeGraph/releases) page:
 
 ```wl
-PacletInstall["https://github.com/mfroeling/CodeGraph/releases/download/0.1.1/CodeGraph-0.1.1.paclet"]
+PacletInstall["https://github.com/mfroeling/CodeGraph/releases/download/0.1.2/CodeGraph-0.1.2.paclet"]
 ```
 
 For the command line, clone the repository and use `CodeGraph/Scripts/codegraph.wls`. It loads the paclet from the
@@ -42,7 +43,9 @@ clone, so nothing has to be installed.
 Needs["CodeGraph`"]  (* or PacletDirectoryLoad["<clone>/CodeGraph"] first when working from a clone *)
 
 cg = BuildCodeGraph["<paclet>/Kernel"];
-CodeGraphSummary[cg]                        (* counts, cyclic package groups, private symbols without callers *)
+(* or skip files you don't care about, by base name or pattern *)
+cg = BuildCodeGraph["<paclet>/Kernel", "Exclude" -> {"Legacy", "*Test*"}];
+CodeGraphSummary[cg]                        (* counts, cycles, "Uncalled" and "Unreachable" dead code candidates *)
 
 PackageGraph[cg]                            (* layered: callers on top, foundation at the bottom, cycles in color *)
 PackageGraph[cg, "Condensed"]               (* each cycle as one box, only edges not implied by a longer path *)
@@ -71,12 +74,15 @@ With `"In"` it shows only what leads to a function. Here is every route to `Find
 ## Use from the command line (for coding agents)
 
 ```shell
-wolframscript -file CodeGraph/Scripts/codegraph.wls <sourceDir> <outDir>
+wolframscript -file CodeGraph/Scripts/codegraph.wls <sourceDir> <outDir> [exclude ...]
 ```
+
+Any arguments after `<outDir>` are file names or patterns to skip, like `Legacy` or `"*Test*"`. Calls into skipped
+files disappear from the graph, and functions that only skipped files use show up as dead code candidates.
 
 This writes three files:
 
-- `overview.md`: package layers, dependency cycles, the most used functions and private functions without callers. An
+- `overview.md`: package layers, dependency cycles, the most used functions and dead code candidates. An
   agent can read this short file at the start of a session to learn the structure of the code.
 - `defs.tsv`: `symbol, package, line, public, file`
 - `edges.tsv`: `caller, callerPackage, line, callee, calleePackage`
@@ -141,6 +147,10 @@ size, so rebuild at milestones, not after every edit.
 - Files without a context of their own, which a loader usually pulls in with `Get`, are grouped per folder. Their
   definitions are public when a public section or `PacletInfo` declares them, for example as ``"Pkg`f"``.
 - A "call" is any use of a defined symbol inside a definition, so a data head used in patterns counts as well.
+- Code that runs at load time, such as ``ImportExport`RegisterImport[...]``, calls functions too. It shows up as a
+  `(top level)` caller of its package. Declarations like `SetAttributes` or `Protect` are not counted.
+- Option defaults count as calls by the function that owns them: in `Options[f] = {Opt -> g}`, `f` calls `g`. The same
+  goes for `Format[f[...]]`.
 
 ## Limits
 

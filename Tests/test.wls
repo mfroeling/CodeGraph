@@ -26,6 +26,18 @@ checks = {
 	"declared in PacletInfo" -> defs[{"s2", "parts"}],
 	(*code before BeginPackage belongs to the context of its own file*)
 	"loader code" -> KeyExistsQ[defs, {"$otherLoaded", "Other`A`"}],
+	(*top-level code run at load time calls functions, declarations like SetAttributes do not*)
+	"top level" -> MemberQ[edges, {"(top level)", "Split", "registered", "Split"}] &&
+		!MemberQ[CodeGraphSummary[cg]["Uncalled"], "registered"] && MemberQ[CodeGraphSummary[cg]["Uncalled"], "unused"],
+	(*option defaults count as calls by the function that owns the options, without an extra definition row*)
+	"options" -> MemberQ[edges, {"fb2", "B", "defaultB", "B"}] && Count[cg["Definitions"], {"fb2", __}] == 1,
+	(*a dead chain: only its top has no caller, but all of it is unreachable, live helpers are not*)
+	"unreachable" -> With[{s = CodeGraphSummary[cg]},
+		MemberQ[s["Uncalled"], "deadTop"] && !MemberQ[s["Uncalled"], "deadMid"] &&
+		SubsetQ[s["Unreachable"], {"deadTop", "deadMid", "unused"}] && !MemberQ[s["Unreachable"], "helper" | "registered"]],
+	(*excluded files are not parsed, so their package disappears*)
+	"exclude" -> With[{ex = BuildCodeGraph[FileNameJoin[{DirectoryName[$InputFileName], "fixtures"}], "Exclude" -> {"split*"}]},
+		!MemberQ[ex["Definitions"][[All, 2]], "Split"] && MemberQ[ex["Definitions"][[All, 2]], "B"]],
 	(*Block local shadowing a function is not a call*)
 	"locals" -> !MemberQ[edges, {"fb", "B", "fa", _}] && MemberQ[edges, {"fb2", "B", "fa", "Multi`A`"}],
 	(*two steps up from helper: sb calls it directly, sa via sb*)

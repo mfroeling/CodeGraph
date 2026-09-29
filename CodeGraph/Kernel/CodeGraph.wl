@@ -17,7 +17,8 @@ BeginPackage["CodeGraph`", {"CodeParser`"}];
 
 BuildCodeGraph::usage =
 "BuildCodeGraph[dir] parses all .wl and .m files under dir without evaluating them and gives the call graph as an Association with \"Definitions\" and \"Edges\".
-Packages are the contexts from BeginPackage or Package, files without one are their own package.";
+Packages are the contexts from BeginPackage or Package, files without one are grouped per folder.
+BuildCodeGraph[dir, \"Exclude\" -> {name, ...}] skips files whose base name matches one of the string patterns, like \"Legacy\" or \"*Test*\".";
 
 ExportCodeGraph::usage =
 "ExportCodeGraph[dir, cg] writes the call graph cg as defs.tsv and edges.tsv to dir.";
@@ -26,10 +27,10 @@ ImportCodeGraph::usage =
 "ImportCodeGraph[dir] reads a call graph written by ExportCodeGraph.";
 
 CodeGraphSummary::usage =
-"CodeGraphSummary[cg] gives the counts, the cyclic package groups and the private symbols without callers of the call graph cg.";
+"CodeGraphSummary[cg] gives the counts, the cyclic package groups, the private symbols without callers (\"Uncalled\") and the private symbols no public function or load-time code reaches (\"Unreachable\").";
 
 CodeGraphOverview::usage =
-"CodeGraphOverview[cg] gives a markdown overview of the call graph cg: package layers, cycles, the 20 most used functions and private functions without callers.
+"CodeGraphOverview[cg] gives a markdown overview of the call graph cg: package layers, cycles, the 20 most used functions and dead code candidates.
 CodeGraphOverview[cg, n] lists the n most used functions. ExportCodeGraph writes it as overview.md.";
 
 CodeGraphQuery::usage =
@@ -96,13 +97,31 @@ walk[CallNode[LeafNode[Symbol, "BeginPackage" | "Begin", _], {c_, ___}, _]] := p
 walk[CallNode[LeafNode[Symbol, "EndPackage" | "End", _], {}, _]] := pop[];
 walk[CallNode[LeafNode[Symbol, "Package", _], {c_}, _]] := (stack = {str[c], str[c] <> "PackageScope`"}; If[first === None, first = str[c]]);
 walk[CallNode[LeafNode[Symbol, "PackageExport", _], {c_}, _]] := AppendTo[mentions, {First[stack, None], str[c]}];
-walk[st : CallNode[LeafNode[Symbol, "Set" | "SetDelayed", _], {lhs_, _}, data_]] := With[{h = lhsHead[lhs]},
+walk[st : CallNode[LeafNode[Symbol, "Set" | "SetDelayed", _], {lhs_, _}, data_]] := With[{h = lhsHead[lhs], o = owner[lhs]},
 	mention[st];
 	If[StringQ[h] && !MemberQ[$skip, short[h]], AppendTo[defs, <|
 		"name" -> short[h], "context" -> First[stack, None], "private" -> Length[stack] > 1,
-		"line" -> data[Source][[1, 1]], "file" -> file, "node" -> st|>]]
+		"line" -> data[Source][[1, 1]], "file" -> file, "node" -> st|>]];
+	(*Options[f] and Format[f[..]] belong to f, their references count as calls by f but they are no definition row*)
+	If[StringQ[o], AppendTo[defs, <|
+		"name" -> short[o], "context" -> First[stack, None], "private" -> Length[stack] > 1,
+		"line" -> data[Source][[1, 1]], "file" -> file, "node" -> st, "row" -> False|>]]
 ];
-walk[st_] := mention[st];
+
+owner[CallNode[LeafNode[Symbol, "Options" | "Format", _], {a_, ___}, _]] := lhsHead[a];
+owner[_] := Missing[];
+walk[st_] := (mention[st]; topLevel[st]);
+
+(*code run at load time, like RegisterImport[...], calls functions too; declarations and public sections do not*)
+$declarations = {"SetAttributes", "Protect", "Unprotect", "ClearAll", "Clear", "Remove", "Needs", "Get", "DeclarePackage",
+	"PackageImport", "PackageScope", "PackageExport", "SyntaxInformation", "Options", "SetOptions", "Attributes", "Off", "On"};
+
+topLevel[st : CallNode[LeafNode[Symbol, h_, _], _, data_]] /; Length[stack] != 1 && !MemberQ[$declarations, short[h]] := AppendTo[defs, <|
+	"name" -> $topLevel, "context" -> First[stack, None], "private" -> True,
+	"line" -> data[Source][[1, 1]], "file" -> file, "node" -> st|>];
+topLevel[_] := Null;
+
+$topLevel = "(top level)";
 
 (*code outside any package belongs to the first context of its file, if the file has one*)
 parseFile[f_] := Block[{file = f, stack = {}, first = None, defs = {}, mentions = {}},
@@ -115,10 +134,12 @@ parseFile[f_] := Block[{file = f, stack = {}, first = None, defs = {}, mentions 
 (*BuildCodeGraph*)
 
 
-SyntaxInformation[BuildCodeGraph] = {"ArgumentsPattern" -> {_}};
+Options[BuildCodeGraph] = {"Exclude" -> {}};
 
-BuildCodeGraph[dir_String] := Block[{files, parsed, defs, mentions, declared, anyContext, folder, key, label, pack, names, packsOf, publicPack, ctxPack, resolve, edges},
-	files = FileNames[{"*.wl", "*.m"}, dir, Infinity];
+SyntaxInformation[BuildCodeGraph] = {"ArgumentsPattern" -> {_, OptionsPattern[]}};
+
+BuildCodeGraph[dir_String, OptionsPattern[]] := Block[{files, parsed, defs, mentions, declared, anyContext, folder, key, label, pack, names, packsOf, publicPack, ctxPack, resolve, edges},
+	files = Select[FileNames[{"*.wl", "*.m"}, dir, Infinity], !StringMatchQ[FileBaseName[#], Alternatives @@ Flatten[{OptionValue["Exclude"]}]] &];
 	parsed = parseFile /@ files;
 	defs = Flatten[parsed[[All, 1]]];
 	mentions = Union @@ parsed[[All, 2]];
@@ -155,7 +176,7 @@ BuildCodeGraph[dir_String] := Block[{files, parsed, defs, mentions, declared, an
 	]] /@ defs);
 
 	<|"Source" -> dir,
-		"Definitions" -> Union[{#name, #pack, #line, #public, #file} & /@ defs],
+		"Definitions" -> Union[{#name, #pack, #line, #public, #file} & /@ Select[defs, Lookup[#, "row", True] &]],
 		"Edges" -> edges|>
 ];
 
@@ -190,9 +211,12 @@ ImportCodeGraph[dir_String] := <|"Source" -> dir,
 
 SyntaxInformation[CodeGraphSummary] = {"ArgumentsPattern" -> {_}};
 
-CodeGraphSummary[cg_Association] := Block[{packEdges, public},
+CodeGraphSummary[cg_Association] := Block[{packEdges, public, g, defs, roots},
 	packEdges = Union[Cases[cg["Edges"], {_, a_, _, _, b_} /; a =!= b :> DirectedEdge[a, b]]];
 	public = Union[Cases[cg["Definitions"], {s_, _, _, True, _} :> s]];
+	(*everything reachable from public functions or load time code is alive*)
+	{g, defs} = symbolGraph[cg];
+	roots = Select[VertexList[g], MemberQ[public, #[[1]]] || #[[1]] === $topLevel &];
 	<|
 		"Files" -> Length[Union[cg["Definitions"][[All, 5]]]],
 		"Definitions" -> Length[cg["Definitions"]],
@@ -200,7 +224,8 @@ CodeGraphSummary[cg_Association] := Block[{packEdges, public},
 		"Edges" -> Length[cg["Edges"]],
 		"PackageDependencies" -> Length[packEdges],
 		"CyclicGroups" -> Select[ConnectedComponents[Graph[packEdges]], Length[#] > 1 &],
-		"Uncalled" -> Complement[Union[cg["Definitions"][[All, 1]]], public, Union[cg["Edges"][[All, 4]]]]
+		"Uncalled" -> Complement[Union[cg["Definitions"][[All, 1]]], public, Union[cg["Edges"][[All, 4]]], {$topLevel}],
+		"Unreachable" -> Complement[Union[Complement[Keys[defs], VertexOutComponent[g, roots]][[All, 1]]], {$topLevel}]
 	|>
 ];
 
@@ -258,7 +283,7 @@ CodeGraphOverview[cg_Association, top_Integer: 20] := Block[{sum, of, dag, h, la
 	StringRiffle[Flatten[{
 		"# Code graph overview",
 		"",
-		"Source: `" <> cg["Source"] <> "`, built " <> DateString["ISODate"] <> ". " <> ToString[sum["Files"]] <> " files, " <>
+		"Source: `" <> FileNameTake[cg["Source"],-7] <> "`, built " <> DateString["ISODate"] <> ". " <> ToString[sum["Files"]] <> " files, " <>
 			ToString[sum["Definitions"]] <> " definitions, " <> ToString[sum["Edges"]] <> " call edges.",
 		"Static analysis: runtime-built calls and callers outside the source are not seen. Rebuild after adding, removing or moving definitions.",
 		"Query with `codegraph.wls <graphDir> callers|callees <symbol> [depth]`, or grep edges.tsv (caller, callerPackage, line, callee, calleePackage).",
@@ -279,9 +304,12 @@ CodeGraphOverview[cg_Association, top_Integer: 20] := Block[{sum, of, dag, h, la
 		"| --- | --- | --- | --- |",
 		"| " <> StringRiffle[ToString /@ #, " | "] <> " |" & /@ Take[usage[cg], UpTo[top]],
 		"",
-		"## Private functions without callers in this source",
+		"## Dead code candidates",
 		"",
-		If[sum["Uncalled"] === {}, "None.", StringRiffle[sum["Uncalled"], ", "]]
+		"Private functions that no public function or load-time code reaches in this source. Marked * have no caller at all,",
+		"the others are only called by other dead code. Callers outside the source, such as notebooks, are not seen.",
+		"",
+		If[sum["Unreachable"] === {}, "None.", StringRiffle[If[MemberQ[sum["Uncalled"], #], # <> "*", #] & /@ sum["Unreachable"], ", "]]
 	}], "\n"]
 ];
 
